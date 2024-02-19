@@ -1,5 +1,6 @@
 # stm32-ad9959
 Small C program for posix-compliant hosts to control the cheap ch*nese AD9959 + stm32 dev boards
+![screenshot](https://github.com/pripyatautomations/stm32-ad9959/blob/main/doc/board-001.jpg?raw=true)
 
 It's planned to try to dump the firmware and decompile it.
 
