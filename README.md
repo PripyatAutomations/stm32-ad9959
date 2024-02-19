@@ -9,9 +9,10 @@ It's planned to try to dump the firmware and decompile it.
 
 If you have one of these boards, this might be of use to you.
 
-Right now the following commands are supported:
+# Supported Commands
+>
+ name	        args	 Description
 
-* name	min/max args	Description
 help		0, 0	This help message
 amp		0, 1	Show/set amplitude [0-1023]
 chan		0, 1	Show/set channel [1-4]
@@ -37,5 +38,9 @@ time		0, 1	Show/set sweep time [1-9999] ms
 ver		0, 0	Show firmware version
 ****
 
+# FSK/AM/PM
+The stm32 isn't hooked to the p1-p4 pins needed to drive 16 level modes...
+
+# Overall
 If you haven't already purchased it, I'd avoid this board... Far better
 options with the ad9959, especially on a faster bus!
