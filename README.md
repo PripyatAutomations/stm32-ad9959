@@ -36,3 +36,6 @@ sweep		0, 1	Show/set sweep status [ON|OFF]
 time		0, 1	Show/set sweep time [1-9999] ms
 ver		0, 0	Show firmware version
 ****
+
+If you haven't already purchased it, I'd avoid this board... Far better
+options with the ad9959, especially on a faster bus!
