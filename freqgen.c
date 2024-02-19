@@ -7,6 +7,7 @@
  * XXX: Implement -x to execute a one-off command from command line
  * XXX: Deal with autoreconnecting
  */
+#include <math.h>
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -111,12 +112,14 @@ void uppercase(char *str) {
 
 double convertPhaseToAngle(int value) {
     // Convert value to angle in the range 0-360
-    return ((double)value / 16383.0) * 360.0;
+//    return ((double)value / 16383.0) * 360.0;
+    return round(((double)value / 16383.0) * 360.0 * 10) / 10.0; // Round to nearest 0.1 degree
 }
 
 int convertAngleToPhase(double angle) {
     // Convert angle to the range 0-16383
-    return (int)((angle / 360.0) * 16383);
+//    return (int)((angle / 360.0) * 16383);
+    return (int)round((angle / 360.0) * 16383);
 }
 
 double stringToDouble(const char *str) {
@@ -366,7 +369,7 @@ void c_phase(int fd, char *argv[], int argc) {
     if (argc > 0) {
        double new_angle = stringToDouble(argv[0]);
        int new_phase = convertAngleToPhase(new_angle);
-       printf("- Chan %d changing phase to %f (%d)\n", curr_chan, new_angle, new_phase);
+       printf("- Chan %d changing phase to %.1f (%d)\n", curr_chan, new_angle, new_phase);
        send_command(fd, "AT+PHA+%d", new_phase);
     }
     send_command(fd, "AT+PHA");
@@ -494,7 +497,7 @@ void process_line(int fd, const char *line) {
        int new_phase = atoi(line + 5);
        double new_angle = convertPhaseToAngle(new_phase);
        chan_state[curr_chan-1].phase  = new_phase;
-       printf("- Chan %d phase: %d (%f deg)\n", curr_chan, chan_state[curr_chan-1].phase, new_angle);
+       printf("- Chan %d phase: %d (%.1f deg)\n", curr_chan, chan_state[curr_chan-1].phase, new_angle);
     } else if (strncmp(line, "+REF=", 5) == 0) {
        int tmp_refclk = atoi(line+5);
        if (tmp_refclk > 0) {

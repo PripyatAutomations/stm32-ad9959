@@ -1,5 +1,5 @@
 CFLAGS := -ggdb -Wall -pedantic
-LDFLAGS := -ggdb -lreadline -lev
+LDFLAGS := -ggdb -lreadline -lev -lm
 port := /dev/ttyACM0
 
 bin := freqgen
