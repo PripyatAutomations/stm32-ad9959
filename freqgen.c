@@ -1,10 +1,13 @@
 /*
  * simple cli tool for controlling a chineze ad9959+stm32 DDS board over USB
  *
+ * Sorry if it's messy, it was mostly thrown together on a monday morning!
+ *
  * Build as such:
  * 	cc -ggdb -Wall -pedantic -o freqgen freqgen.c -lreadline -lev
  *
  * XXX: Implement -x to execute a one-off command from command line
+ * XXX: Implement -l and -s for load and save (also load and save commands)
  * XXX: Deal with autoreconnecting
  */
 #include <math.h>
@@ -16,12 +19,15 @@
 #include <fcntl.h>
 #include <termios.h>
 #include <stdarg.h>
+#include <getopt.h>
 #include <sys/select.h>
 
 #define VERSION "2024-02-19.01"
 #define	MAX_CHAN	4		// how many channels? ad9959 has 4...
 #define BUFFER_SIZE 	512		// this should be plenty
 #define	MAX_ARGS	5		// max arguments to a function...
+#define	MAX_FREQ	200000000
+#define	MIN_FREQ	1
 
 struct cmds {
    char *name;
@@ -112,14 +118,22 @@ void uppercase(char *str) {
 
 double convertPhaseToAngle(int value) {
     // Convert value to angle in the range 0-360
-//    return ((double)value / 16383.0) * 360.0;
     return round(((double)value / 16383.0) * 360.0 * 10) / 10.0; // Round to nearest 0.1 degree
 }
 
 int convertAngleToPhase(double angle) {
     // Convert angle to the range 0-16383
-//    return (int)((angle / 360.0) * 16383);
     return (int)round((angle / 360.0) * 16383);
+}
+
+double convertAmplitudeToPower(int value) {
+    // Convert value to power in the range 0-100%
+    return ((double)value / 1023.0) * 100.0;
+}
+
+int convertPowerToAmplitude(double power) {
+    // Convert power to the range 0-1023
+    return (int)round((power / 100.0) * 1023);
 }
 
 double stringToDouble(const char *str) {
@@ -128,32 +142,33 @@ double stringToDouble(const char *str) {
 }
 
 // yuck ;(
-void c_amp(); void c_chan(); void c_debug(); void c_freq();
+void c_power(); void c_chan(); void c_debug(); void c_freq();
 void c_help(); void c_load(); void c_mode(); void c_mult();
 void c_phase(); void c_quit(); void c_ref(); void c_reset();
 void c_restore(); void c_save(); void c_starta(); void c_enda();
 void c_startf(); void c_endf(); void c_version(); void c_step();
-void c_time(); void c_sweep(); void c_info();
+void c_time(); void c_sweep(); void c_info(); void c_sleep();
 
 struct cmds cons_cmds[] = {
-    { "help", 	  0, 0, c_help,		"This help message" },
-    { "amp",      0, 1, c_amp,          "Show/set amplitude [0-1023]" },
     { "chan", 	  0, 1, c_chan,		"Show/set channel [1-4]" },
     { "debug",    0, 1, c_debug,        "Show/set debug level [0-10]" },
     { "factory",  1, 1, c_restore, 	"Restore factory settings (must pass CONFIRM as arg!)" },
     { "freq",	  0, 1, c_freq,		"Show/set frequency [1-200,000,000] Hz" },
+    { "help", 	  0, 0, c_help,		"This help message" },
     { "info",     0, 1, c_info,         "Show board information" },
     { "load",     0, 1, c_load,         "Load settings from stdin or file" },
     { "mode",	  0, 1, c_mode,		"Show/set mode [POINT|SWEEP|FSK2|FSK4|AM]" },
     { "mult",	  0, 1, c_mult,		"Show/set multiplier [1-20]" },
-    { "phase",    0, 1, c_phase,        "Show/set phase [0-16383 corresponding to 0-360 deg]" },
+    { "phase",    0, 1, c_phase,        "Show/set phase [0.0-360.0] degrees" },
+    { "power",    0, 1, c_power,        "Show/set power [0-1023] | [0-100%]" },
     { "quit",     0, 0, c_quit,         "Exit the program" },
     { "ref",	  0, 1, c_ref,		"Show/set refclk freq [10,000,000-125,000,000] Hz" },
     { "reset", 	  0, 0, c_reset,        "Reset the board" },
     { "save",     0, 1, c_save,         "Save the settings to stdout or file" },
-    { "enda",     0, 1, c_enda,         "Show/set sweep END amplitude [0-1023]" },
+    { "sleep",    1, 1, c_sleep,        "Sleep x ms" },
+    { "enda",     0, 1, c_enda,         "Show/set sweep END amplitude [0-1023] | [0-100%]" },
     { "endf",     0, 1, c_endf,         "Show/set sweep END frequency [STARTFRE-200,000,000]" },
-    { "starta",   0, 1, c_starta,       "Show/set sweep START amplitude [0-1023]" },
+    { "starta",   0, 1, c_starta,       "Show/set sweep START amplitude [0-1023] | [0-100%]" },
     { "startf",   0, 1, c_startf,       "Show/set sweep START frequency [1-ENDFRE]" },
     { "step",     0, 1, c_step,         "Show/set sweep STEP interval [1-200,000,000] Hz" },
     { "sweep",    0, 1, c_sweep,        "Show/set sweep status [ON|OFF]" },
@@ -177,19 +192,6 @@ void send_command(int fd, const char *format, ...) {
     write(fd, "\r\n", 2);
 }
 
-void c_amp(int fd, char *argv[], int argc) {
-    // Min: 0, Max: 1023
-    if (argc > 0) {
-       int new_amp = atoi(argv[0]);
-       if (new_amp < 0 || new_amp > 1023) {
-          printf("*** Invalid value (%d) for AMP given: range 0-1023\n", new_amp);
-          return;
-       }
-       send_command(fd, "AT+AMP+%d", new_amp);
-    }
-    send_command(fd, "AT+AMP");
-}
-
 void c_chan(int fd, char *argv[], int argc) {
     if (argc > 0) {
         curr_chan = atoi(argv[0]);
@@ -211,14 +213,76 @@ void c_debug(int fd, char *argv[], int argc) {
     }
 }
 
+void c_enda(int fd, char *argv[], int argc) {
+   if (argc > 0) {
+      int new_amp = atoi(argv[0]);
+      if (new_amp < 0 || new_amp > 1023) {
+         printf("*** Invalid argument to enda: Value %d out of bounds [0-1023]\n", new_amp);
+         return;
+      }
+      send_command(fd, "AT+ENDAMP+%d", new_amp);
+   }
+   send_command(fd, "AT+ENDAMP");
+}
+
+void c_endf(int fd, char *argv[], int argc) {
+   if (argc > 0) {
+      int new_freq = atoi(argv[0]);
+      if (new_freq < MIN_FREQ || new_freq > MAX_FREQ) {
+         printf("*** Invalid argument to endf: Value %d out of bounds [STARTFRE-200,000,000]\n", new_freq);
+         return;
+      }
+      send_command(fd, "AT+ENDFRE+%d", new_freq);
+   }
+   send_command(fd, "AT+ENDFRE");
+}
+
 void c_freq(int fd, char *argv[], int argc) {
     if (argc > 0) {
+        int new_freq = atoi(argv[0]);
+        if (new_freq < MIN_FREQ || new_freq > MAX_FREQ) {
+           printf("* Frequency %d is outside limits [%d - %d]\n", new_freq, MIN_FREQ, MAX_FREQ);
+           return;
+        }
         if (debug) {
            printf("Setting channel %d frequency to %s\n", curr_chan, argv[0]);
         }
         send_command(fd, "AT+FRE+%s", argv[0]);
     }
     send_command(fd, "AT+FRE");
+}
+
+void c_help(int fd, char *argv[], int argc) {
+    struct cmds *c;
+    printf("****\n");
+    printf("AD9959 controller help:\n");
+    printf("* name\tmin/max args\tDescription\n");
+    int i = 0;
+    while (i < 100) {
+       c = &cons_cmds[i];
+
+       // is this the last record?
+       if (c->func == NULL && c->min_args == 0 && c->max_args == 0) {
+          break;
+       }
+       printf("%s\t\t%d, %d\t%s\n", c->name, c->min_args, c->max_args, c->msg);
+       i++;
+    }
+    printf("****\n");
+}
+
+void c_info(int fd, char *argv[], int argc) {
+    c_version(fd, NULL, 0);
+    c_ref(fd, NULL, 0);
+    c_mult(fd, NULL, 0);
+    c_chan(fd, NULL, 0);
+
+    // clear starting flag
+    starting_up = 0;
+}
+
+void c_load(int fd, char *argv[], int argc) {
+   printf("Not yet implemented: load\n");
 }
 
 void c_mode(int fd, char *argv[], int argc) {
@@ -246,6 +310,39 @@ void c_mult(int fd, char *argv[], int argc) {
     send_command(fd, "AT+MULT");
 }
 
+void c_phase(int fd, char *argv[], int argc) {
+    if (argc > 0) {
+       double new_angle = stringToDouble(argv[0]);
+       int new_phase = convertAngleToPhase(new_angle);
+       printf("- Chan %d changing phase to %.1f (%d)\n", curr_chan, new_angle, new_phase);
+       send_command(fd, "AT+PHA+%d", new_phase);
+    }
+    send_command(fd, "AT+PHA");
+}
+
+void c_power(int fd, char *argv[], int argc) {
+    // Min: 0, Max: 1023
+    if (argc > 0) {
+       int new_amp = atoi(argv[0]);
+       char *percent_p = strchr(argv[0], '%');
+
+       if (percent_p != NULL) {
+          new_amp = convertPowerToAmplitude(new_amp);
+       }
+       if (new_amp < 0 || new_amp > 1023) {
+           printf("*** Invalid value (%s) for GIVEN given: range 0-1023 or 0-100%%\n", argv[0]);
+           return;
+       }
+       send_command(fd, "AT+AMP+%d", new_amp);
+    }
+    send_command(fd, "AT+AMP");
+}
+
+void c_quit(int fd, char *argv[], int argc) {
+   printf("Goodbye!\n");
+   exit(0);
+}
+
 void c_ref(int fd, char *argv[], int argc) {
     if (argc > 0) {
        int refclk = atoi(argv[0]);
@@ -271,6 +368,23 @@ void c_restore(int fd, char *argv[], int argc) {
     exit(0);
 }
 
+void c_save(int fd, char *argv[], int argc) {
+   printf("Not yet implemented: save\n");
+}
+
+void c_sleep(int fd, char *argv[], int argc) {
+   int sleepms = atoi(argv[0]);
+   // limit to 1ms to 60 seconds
+   if (sleepms <= 0 || sleepms > 60000) {
+      printf("invalid sleep time %s limit [0-60000] ms\n", argv[0]);
+      return;
+   }
+
+   printf("Sleep %d ms\n", sleepms);
+   fflush(stdout);
+   usleep(sleepms * 1000);
+}
+
 void c_starta(int fd, char *argv[], int argc) {
    if (argc > 0) {
       int new_amp = atoi(argv[0]);
@@ -287,7 +401,7 @@ void c_startf(int fd, char *argv[], int argc) {
    if (argc > 0) {
       int new_freq = atoi(argv[0]);
       printf("new_freq: %d\n", new_freq);
-      if (new_freq < 1 || new_freq > 200000000) {
+      if (new_freq < 1 || new_freq > MAX_FREQ) {
          printf("*** Invalid argument to startf: Value %d out of bounds [1-200,000,000]\n", new_freq);
          return;
       }
@@ -296,52 +410,16 @@ void c_startf(int fd, char *argv[], int argc) {
    send_command(fd, "AT+STARTFRE");
 }
 
-void c_enda(int fd, char *argv[], int argc) {
-   if (argc > 0) {
-      int new_amp = atoi(argv[0]);
-      if (new_amp < 0 || new_amp > 1023) {
-         printf("*** Invalid argument to enda: Value %d out of bounds [0-1023]\n", new_amp);
-         return;
-      }
-      send_command(fd, "AT+ENDAMP+%d", new_amp);
-   }
-   send_command(fd, "AT+ENDAMP");
-}
-
-void c_endf(int fd, char *argv[], int argc) {
-   if (argc > 0) {
-      int new_freq = atoi(argv[0]);
-      if (new_freq < 1 || new_freq > 200000000) {
-         printf("*** Invalid argument to endf: Value %d out of bounds [STARTFRE-200,000,000]\n", new_freq);
-         return;
-      }
-      send_command(fd, "AT+ENDFRE+%d", new_freq);
-   }
-   send_command(fd, "AT+ENDFRE");
-}
-
 void c_step(int fd, char *argv[], int argc) {
     if (argc > 0) {
        int new_step = atoi(argv[0]);
-       if (new_step < 1 || new_step > 200000000) {
+       if (new_step < MIN_FREQ || new_step > MAX_FREQ) {
           printf("*** Invalid argument to step: Value %d out of bounds[1-200,000,000]\n", new_step);
           return;
        }
        send_command(fd, "AT+STEP+%d", new_step);
     }
    send_command(fd, "AT+STEP");
-}
-
-void c_time(int fd, char *argv[], int argc) {
-    if (argc > 0) {
-       int new_time = atoi(argv[0]);
-       if (new_time < 1 || new_time > 9999) {
-          printf("*** Invalid argument to time: Value %d out of bounds[1-9999]\n", new_time);
-          return;
-       }
-       send_command(fd, "AT+TIME+%d", new_time);
-    }
-    send_command(fd, "AT+TIME");
 }
 
 void c_sweep(int fd, char *argv[], int argc) {
@@ -365,60 +443,20 @@ void c_sweep(int fd, char *argv[], int argc) {
    send_command(fd, "AT+SWEEP");
 }
 
-void c_phase(int fd, char *argv[], int argc) {
+void c_time(int fd, char *argv[], int argc) {
     if (argc > 0) {
-       double new_angle = stringToDouble(argv[0]);
-       int new_phase = convertAngleToPhase(new_angle);
-       printf("- Chan %d changing phase to %.1f (%d)\n", curr_chan, new_angle, new_phase);
-       send_command(fd, "AT+PHA+%d", new_phase);
+       int new_time = atoi(argv[0]);
+       if (new_time < 1 || new_time > 9999) {
+          printf("*** Invalid argument to time: Value %d out of bounds[1-9999]\n", new_time);
+          return;
+       }
+       send_command(fd, "AT+TIME+%d", new_time);
     }
-    send_command(fd, "AT+PHA");
+    send_command(fd, "AT+TIME");
 }
 
 void c_version(int fd, char *argv[], int argc) {
     send_command(fd, "AT+VERSION");
-}
-
-void c_help(int fd, char *argv[], int argc) {
-    struct cmds *c;
-    printf("****\n");
-    printf("AD9959 controller help:\n");
-    printf("* name\tmin/max args\tDescription\n");
-    int i = 0;
-    while (i < 100) {
-       c = &cons_cmds[i];
-
-       // is this the last record?
-       if (c->func == NULL && c->min_args == 0 && c->max_args == 0) {
-          break;
-       }
-       printf("%s\t\t%d, %d\t%s\n", c->name, c->min_args, c->max_args, c->msg);
-       i++;
-    }
-    printf("****\n");
-}
-
-void c_load(int fd, char *argv[], int argc) {
-   printf("Not yet implemented: load\n");
-}
-
-void c_save(int fd, char *argv[], int argc) {
-   printf("Not yet implemented: save\n");
-}
-
-void c_quit(int fd, char *argv[], int argc) {
-   printf("Goodbye!\n");
-   exit(0);
-}
-
-void c_info(int fd, char *argv[], int argc) {
-    c_version(fd, NULL, 0);
-    c_ref(fd, NULL, 0);
-    c_mult(fd, NULL, 0);
-    c_chan(fd, NULL, 0);
-
-    // clear starting flag
-    starting_up = 0;
 }
 
 void process_line(int fd, const char *line) {
@@ -470,7 +508,7 @@ void process_line(int fd, const char *line) {
        } else if (strcasecmp(new_mode, "POINT") == 0) {
           c_freq(fd, NULL, 0);
           c_phase(fd, NULL, 0);
-          c_amp(fd, NULL, 0);
+          c_power(fd, NULL, 0);
        } else if (strcasecmp(new_mode, "FSK2") == 0) {
           printf("*** Unsupported mode: %s\n", new_mode);
           return;
@@ -616,17 +654,18 @@ void show_help(int argc, char **argv) {
 int main(int argc, char **argv) {
     int opt;
 
-    while ((opt = getopt(argc, argv, "p:d::h")) != -1) {
-        /// XXX: Add -x to execute one command (silently unless -d present) and wait for response
+    struct option long_options[] = {
+        {"port", required_argument, NULL, 'p'},
+        {"debug", optional_argument, NULL, 'd'},
+        {"help", no_argument, NULL, 'h'},
+        {"load", no_argument, NULL, 'l'},
+        {"save", no_argument, NULL, 's'},
+        {"exec", no_argument, NULL, 'x'},
+        {NULL, 0, NULL, 0}
+    };
+
+    while ((opt = getopt_long(argc, argv, "p:d::hl:sx", long_options, NULL)) != -1) {
         switch (opt) {
-            case 'x':
-                // exec_cmd(argc, argv);
-                exit(0);
-                break;
-            case 'h':
-                show_help(argc, argv);
-                exit(1);
-                break;
             case 'p':
                 port = optarg;
                 break;
@@ -640,7 +679,25 @@ int main(int argc, char **argv) {
                     debug = 1; // Default debug level if no value provided
                 }
                 break;
+            case 'h':
+                show_help(argc, argv);
+                exit(EXIT_SUCCESS);
+            case 'l':
+                // Call c_load function
+                printf("Calling c_load function\n");
+                break;
+            case 's':
+                // Call c_save function
+                printf("Calling c_save function\n");
+                break;
+            case 'x':
+                // Call c_exec function
+                printf("Calling c_exec function\n");
+                // exec_cmd(argc, argv);
+                exit(0);
+                break;
             default:
+                // Invalid option
                 show_help(argc, argv);
                 exit(EXIT_FAILURE);
         }
