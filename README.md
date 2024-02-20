@@ -45,3 +45,6 @@ The stm32 isn't hooked to the p1-p4 pins needed to drive 16 level modes...
 # Overall
 If you haven't already purchased it, I'd avoid this board... Far better
 options with the ad9959, especially on a faster bus!
+
+# ToDo
+MODE is global apparently, not per channel ;(
